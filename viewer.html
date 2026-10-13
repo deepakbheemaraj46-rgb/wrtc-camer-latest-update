@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Camera Viewer</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#111827;color:#f9fafb;font:16px Arial,sans-serif;padding:20px}
+main{max-width:1000px;margin:auto}h1{text-align:center}.row{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0}
+input,button{font-size:1rem;padding:11px;border-radius:8px;border:1px solid #4b5563}input{background:#1f2937;color:white;flex:1;min-width:220px}button{cursor:pointer;background:#2563eb;color:white;border:0}button:disabled{opacity:.55;cursor:default}.audioBtn{background:#059669}
+#status{background:#1f2937;border-radius:8px;padding:12px;margin:12px 0}.card{background:#030712;border-radius:12px;overflow:hidden;margin:14px 0;padding-bottom:12px}video{width:100%;max-height:70vh;aspect-ratio:16/9;object-fit:contain;background:#000;display:block}.card p{padding:0 12px}
+</style>
+</head>
+<body><main>
+<h1>Camera Viewer</h1>
+<p>This dashboard automatically discovers cameras that are currently sharing. Each camera owner must approve your viewing request. Use Enable Audio after streams connect if your browser blocks sound.</p>
+<div class="row"><button id="enableAudio" class="audioBtn">Enable Audio</button><button id="refreshCameras">Refresh Cameras</button></div>
+<div id="status" role="status">Not connected.</div>
+<div id="videos"></div>
+<script>
+"use strict";
+const enableAudioBtn=document.getElementById("enableAudio"),refreshBtn=document.getElementById("refreshCameras"),statusEl=document.getElementById("status"),videosEl=document.getElementById("videos");
+const requestedCameras=new Set();
+const viewerId=(globalThis.crypto&&typeof crypto.randomUUID==="function")?crypto.randomUUID():"view-"+Math.random().toString(36).slice(2)+Date.now().toString(36);let socket=null,retry=null;
+const peers=new Map(),cards=new Map(),queuedIce=new Map();
+const rtcConfig={iceServers:[{urls:"stun:stun.l.google.com:19302"}],bundlePolicy:"max-bundle"};
+function setStatus(s){statusEl.textContent=s}
+function send(m){if(socket&&socket.readyState===WebSocket.OPEN)socket.send(JSON.stringify(m))}
+function connect(){
+ if(socket&&(socket.readyState===WebSocket.OPEN||socket.readyState===WebSocket.CONNECTING))return;
+ socket=new WebSocket(`${location.protocol==="https:"?"wss:":"ws:"}//${location.host}`);
+ socket.onopen=()=>{send({type:"register-viewer",viewerId});setStatus("Connected. Looking for cameras that are sharing…");};
+ socket.onmessage=async e=>{let m;try{m=JSON.parse(e.data)}catch{return}
+   if(m.type==="camera-online"){
+     setStatus("Camera found. Requesting permission from its owner…");
+     requestCamera(m.cameraId);
+   }
+   if(m.type==="camera-offline"){requestedCameras.delete(m.cameraId);if(cards.has(m.cameraId)){cards.get(m.cameraId).status.textContent="Camera stopped. Please ask the owner to start the camera again.";closePeer(m.cameraId);}}
+   if(m.type==="offer")await handleOffer(m);
+   if(m.type==="camera-ice")await handleIce(m);
+ };
+ socket.onclose=()=>{socket=null;setStatus("Disconnected. Reconnecting…");clearTimeout(retry);retry=setTimeout(connect,1500)};
+ socket.onerror=()=>setStatus("Signaling connection error.");
+}
+function requestCamera(cameraId){
+ if(!cameraId || requestedCameras.has(cameraId))return;
+ requestedCameras.add(cameraId);makeCard(cameraId);
+ if(socket?.readyState===WebSocket.OPEN){send({type:"watch-camera",cameraId});cards.get(cameraId).status.textContent="Request sent. Waiting for camera owner approval…";}
+ else requestedCameras.delete(cameraId);
+}
+function makeCard(cameraId){
+ if(cards.has(cameraId))return;
+ const box=document.createElement("section");box.className="card";
+ const title=document.createElement("p");title.textContent="Camera "+cameraId.slice(0,8);
+ const video=document.createElement("video");video.autoplay=true;video.playsInline=true;video.controls=true;video.muted=true;
+ const status=document.createElement("p");status.textContent="Waiting for camera…";
+ box.append(title,video,status);videosEl.appendChild(box);cards.set(cameraId,{box,video,status});
+}
+async function handleOffer(m){
+ const cameraId=m.cameraId;makeCard(cameraId);closePeer(cameraId);if(!queuedIce.has(cameraId))queuedIce.set(cameraId,[]);
+ const card=cards.get(cameraId),pc=new RTCPeerConnection(rtcConfig);peers.set(cameraId,pc);
+ pc.ontrack=e=>{card.video.srcObject=e.streams[0]||new MediaStream([e.track]);card.video.play().then(()=>card.status.textContent="LIVE — video is playing; press Enable Audio for sound.").catch(()=>card.status.textContent="Stream received — press Play to view.");};
+ pc.onicecandidate=e=>{if(e.candidate)send({type:"viewer-ice",cameraId,viewerId,candidate:e.candidate})};
+ pc.onconnectionstatechange=()=>{if(pc.connectionState==="connected")card.status.textContent="LIVE";else if(["failed","disconnected"].includes(pc.connectionState))card.status.textContent="Connection interrupted — retrying…"};
+ try{
+  await pc.setRemoteDescription({type:"offer",sdp:m.sdp});
+  for(const c of queuedIce.get(cameraId)||[]){try{await pc.addIceCandidate(c)}catch(err){console.warn(err)}}
+  queuedIce.delete(cameraId);
+  const answer=await pc.createAnswer();await pc.setLocalDescription(answer);
+  send({type:"answer",cameraId,viewerId,sdp:pc.localDescription.sdp});
+ }catch(err){console.error(err);card.status.textContent="Could not connect. Check the camera ID and network."}
+}
+async function handleIce(m){
+ const pc=peers.get(m.cameraId);
+ if(!pc||!pc.remoteDescription){if(!queuedIce.has(m.cameraId))queuedIce.set(m.cameraId,[]);queuedIce.get(m.cameraId).push(m.candidate);return}
+ try{await pc.addIceCandidate(m.candidate)}catch(err){console.warn("ICE candidate skipped",err)}
+}
+function closePeer(id){const p=peers.get(id);if(p){p.close();peers.delete(id)}queuedIce.delete(id)}
+refreshBtn.addEventListener("click",()=>{requestedCameras.clear();for(const [id,card] of cards){if(!peers.has(id))card.status.textContent="Waiting for camera to reconnect…";} if(socket?.readyState===WebSocket.OPEN){socket.close();} connect();});
+enableAudioBtn.addEventListener("click",async()=>{
+  const active=[...cards.values()].filter(c=>c.video.srcObject);
+  if(!active.length){setStatus("Connect to a camera first.");return;}
+  let ok=0;
+  for(const card of active){try{card.video.muted=false;card.video.volume=1;await card.video.play();ok++;}catch(err){console.warn("Audio playback blocked",err);}}
+  setStatus(ok?"Audio enabled. If you still hear nothing, check device volume and the camera microphone permission.":"The browser blocked playback. Tap the video Play control and check browser/site sound settings.");
+});
+connect();
+</script></main></body></html>
