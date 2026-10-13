@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Camera Share</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#111827;color:#f9fafb;font:16px Arial,sans-serif;padding:20px}
+main{max-width:850px;margin:auto}h1{font-size:1.6rem}p{line-height:1.5;color:#d1d5db}
+video{width:100%;max-height:65vh;background:#000;border-radius:12px;display:block;object-fit:contain}
+.controls{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}
+button{border:0;border-radius:8px;padding:12px 16px;font-size:1rem;cursor:pointer}
+#start{background:#16a34a;color:white}#stop{background:#dc2626;color:white}#status{padding:12px;border-radius:8px;background:#1f2937;margin:12px 0}
+#code{font-family:monospace;font-size:1.1rem;word-break:break-word}
+</style>
+</head>
+<body>
+<main>
+<h1>Camera Share</h1>
+<p>Your camera and microphone are shared only after you press Start and approve the browser permission prompt. Keep this page open while sharing. Use Stop Camera to end sharing.</p>
+<div id="status" role="status">Camera is off.</div>
+<video id="preview" autoplay playsinline muted></video>
+<div class="controls">
+  <button id="start">Start Camera</button>
+  <button id="stop" disabled>Stop Camera</button>
+</div>
+<p>Share this camera ID only with a person you trust:</p>
+<div id="code">Not connected</div>
+<script>
+"use strict";
+const preview=document.getElementById("preview");
+const statusEl=document.getElementById("status");
+const startBtn=document.getElementById("start");
+const stopBtn=document.getElementById("stop");
+const codeEl=document.getElementById("code");
+const cameraId=(globalThis.crypto&&typeof crypto.randomUUID==="function")?crypto.randomUUID():"cam-"+Math.random().toString(36).slice(2)+Date.now().toString(36);
+let stream=null, socket=null, reconnectTimer=null;
+const peers=new Map();
+const queuedIce=new Map();
+const rtcConfig={iceServers:[{urls:"stun:stun.l.google.com:19302"}],bundlePolicy:"max-bundle"};
+function setStatus(s){statusEl.textContent=s;}
+function send(message){if(socket&&socket.readyState===WebSocket.OPEN)socket.send(JSON.stringify(message));}
+function connect(){
+  if(!stream || (socket&&(socket.readyState===WebSocket.OPEN||socket.readyState===WebSocket.CONNECTING)))return;
+  const scheme=location.protocol==="https:"?"wss:":"ws:";
+  socket=new WebSocket(`${scheme}//${location.host}`);
+  socket.onopen=()=>{send({type:"register-camera",cameraId});codeEl.textContent=cameraId;setStatus("Camera is on. Waiting for an authorized viewer request.");};
+  socket.onmessage=async e=>{
+    let m;try{m=JSON.parse(e.data)}catch{return}
+    if(m.type==="viewer-request") await createPeer(m.viewerId);
+    if(m.type==="answer"){
+      const pc=peers.get(m.viewerId);if(!pc)return;
+      try{
+        await pc.setRemoteDescription({type:"answer",sdp:m.sdp});
+        const list=queuedIce.get(m.viewerId)||[];
+        for(const c of list){try{await pc.addIceCandidate(c)}catch(err){console.warn("ICE candidate skipped",err)}}
+        queuedIce.delete(m.viewerId);
+      }catch(err){console.error(err);setStatus("Could not establish viewer connection. Try reconnecting.");}
+    }
+    if(m.type==="viewer-ice"){
+      const pc=peers.get(m.viewerId);
+      if(!pc||!pc.remoteDescription){if(!queuedIce.has(m.viewerId))queuedIce.set(m.viewerId,[]);queuedIce.get(m.viewerId).push(m.candidate);return;}
+      try{await pc.addIceCandidate(m.candidate)}catch(err){console.warn("ICE candidate skipped",err)}
+    }
+  };
+  socket.onclose=()=>{socket=null;if(stream){setStatus("Signaling disconnected. Reconnecting…");clearTimeout(reconnectTimer);reconnectTimer=setTimeout(connect,1500);}};
+  socket.onerror=()=>setStatus("Connection error. Check the server and internet connection.");
+}
+async function createPeer(viewerId){
+  if(!stream)return;
+  const old=peers.get(viewerId);if(old)old.close();
+  queuedIce.delete(viewerId);
+  const pc=new RTCPeerConnection(rtcConfig);peers.set(viewerId,pc);
+  stream.getTracks().forEach(track=>pc.addTrack(track,stream));
+  pc.onicecandidate=e=>{if(e.candidate)send({type:"camera-ice",cameraId,viewerId,candidate:e.candidate});};
+  pc.onconnectionstatechange=()=>{
+    if(pc.connectionState==="connected")setStatus("LIVE — your camera is being shared with a viewer.");
+    else if(["failed","disconnected"].includes(pc.connectionState))setStatus("Viewer connection interrupted. It may reconnect automatically.");
+  };
+  try{
+    const offer=await pc.createOffer();await pc.setLocalDescription(offer);
+    send({type:"offer",cameraId,viewerId,sdp:pc.localDescription.sdp});
+  }catch(err){console.error(err);setStatus("Unable to start viewer connection.");}
+}
+async function startCamera(){
+  startBtn.disabled=true;
+  try{
+    if(!navigator.mediaDevices?.getUserMedia)throw new Error("Camera access requires HTTPS or localhost in a supported browser.");
+    setStatus("Requesting camera and microphone permission…");
+    // Start with a responsive 720p stream and voice-friendly audio processing.
+    // Browsers may adjust unsupported constraints to the device's capabilities.
+    stream=await navigator.mediaDevices.getUserMedia({
+      video:{width:{ideal:1280},height:{ideal:720},frameRate:{ideal:30}},
+      audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true,channelCount:{ideal:1}}
+    });
+    preview.srcObject=stream;
+    await preview.play().catch(()=>{});
+    stopBtn.disabled=false;
+    codeEl.textContent=cameraId;
+    setStatus("Permission granted. Starting live connection…");
+    // Open signaling immediately after permission is granted; no extra page/button is required.
+    connect();
+  }catch(err){
+    console.error(err);stream=null;startBtn.disabled=false;
+    setStatus(err.name==="NotAllowedError"?"Permission denied. Allow camera/microphone access in your browser settings.":err.message||"Could not start the camera.");
+  }
+}
+function stopCamera(){
+  clearTimeout(reconnectTimer);
+  for(const pc of peers.values())pc.close();
+  peers.clear();queuedIce.clear();
+  if(socket){try{send({type:"unregister-camera",cameraId});socket.close()}catch{}socket=null;}
+  if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;}
+  preview.srcObject=null;startBtn.disabled=false;stopBtn.disabled=true;codeEl.textContent="Not connected";setStatus("Camera is off.");
+}
+startBtn.addEventListener("click",startCamera);
+stopBtn.addEventListener("click",stopCamera);
+window.addEventListener("pagehide",()=>{if(stream)stream.getTracks().forEach(t=>t.stop());});
+</script>
+</main>
+</body>
+</html>
