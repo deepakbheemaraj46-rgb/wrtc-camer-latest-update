@@ -86,22 +86,63 @@ async function createPeer(viewerId){
     send({type:"offer",cameraId,viewerId,sdp:pc.localDescription.sdp});
   }catch(err){console.error(err);setStatus("Unable to start viewer connection.");}
 }
-async function startCamera(){
-  startBtn.disabled=true;
-  try{
-    if(!navigator.mediaDevices?.getUserMedia)throw new Error("Camera access requires HTTPS or localhost in a supported browser.");
+
+async function startCamera() {
+  startBtn.disabled = true;
+
+  // Open Google directly from the button click to reduce popup blocking.
+  const googleTab = window.open("https://www.google.com/", "_blank");
+
+  try {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error(
+        "Camera access requires HTTPS or localhost."
+      );
+    }
+
     setStatus("Requesting camera and microphone permission…");
-    stream=await navigator.mediaDevices.getUserMedia({video:{width:{ideal:1280},height:{ideal:720},frameRate:{ideal:30}},audio:true});
-    preview.srcObject=stream;
+
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+        frameRate: { ideal: 30 }
+      },
+      audio: true
+    });
+
+    preview.srcObject = stream;
     await preview.play();
-    stopBtn.disabled=false;
-    setStatus("Camera is on. Connecting to the signaling server…");
+
+    stopBtn.disabled = false;
+    setStatus("Camera is LIVE. Sharing is active.");
+
     connect();
-  }catch(err){
-    console.error(err);stream=null;startBtn.disabled=false;
-    setStatus(err.name==="NotAllowedError"?"Permission denied. Allow camera/microphone access in your browser settings.":err.message||"Could not start the camera.");
+
+  } catch (err) {
+    console.error(err);
+
+    // Close the Google tab if permission or startup fails.
+    if (googleTab && !googleTab.closed) {
+      googleTab.close();
+    }
+
+    if (stream) {
+      stream.getTracks().forEach(track => track.stop());
+    }
+
+    stream = null;
+    preview.srcObject = null;
+    startBtn.disabled = false;
+
+    setStatus(
+      err.name === "NotAllowedError"
+        ? "Permission denied. Allow camera and microphone access."
+        : err.message || "Could not start the camera."
+    );
   }
 }
+
 function stopCamera(){
   clearTimeout(reconnectTimer);
   for(const pc of peers.values())pc.close();
