@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ClearView — Live Viewer</title>
+  <style>
+    :root{font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif;color:#172033;background:#f5f7fb}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at top right,#e7efff,transparent 38%),#f5f7fb}
+    .wrap{max-width:1100px;margin:auto;padding:26px 18px 44px}.top{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:24px}
+    .brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:20px}.logo{display:grid;place-items:center;width:42px;height:42px;border-radius:14px;background:#315efb;color:white}
+    .pill{font-size:12px;font-weight:800;color:#667085;background:#eaedf3;padding:8px 12px;border-radius:99px}.pill.live{color:#067647;background:#dff8eb}
+    .card{background:#fff;border:1px solid #e5eaf3;border-radius:24px;padding:22px;box-shadow:0 12px 36px #18284b0a}
+    h1{font-size:clamp(27px,4vw,38px);letter-spacing:-1px;margin:0 0 8px}p{color:#667085;line-height:1.6;margin:0 0 18px}
+    .videoBox{position:relative;aspect-ratio:16/9;background:#0b1020;border-radius:18px;overflow:hidden;display:grid;place-items:center;color:#dbe4f4}
+    video{width:100%;height:100%;object-fit:contain;display:block}.placeholder{text-align:center;padding:24px}.placeholder .symbol{font-size:50px;margin-bottom:12px}
+    .controls{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-top:16px}.btn{border:0;border-radius:12px;padding:12px 16px;font-weight:750;cursor:pointer;font-size:14px;background:#eef2f8;color:#24324a}.primary{background:#315efb;color:white}
+    label{display:block;font-size:13px;font-weight:750;margin:16px 0 8px;color:#344054}input{width:100%;padding:13px 14px;border:1px solid #d8deea;border-radius:12px;background:white;font:inherit}
+    .join{display:grid;grid-template-columns:1fr auto;gap:10px;max-width:560px}.status{display:flex;align-items:center;gap:9px;padding:12px 14px;background:#f4f6fa;border-radius:12px;font-size:13px;color:#526078;margin-top:16px}
+    .dot{width:9px;height:9px;border-radius:50%;background:#98a2b3;flex:none}.dot.live{background:#12b76a;box-shadow:0 0 0 4px #12b76a20}
+    .note{font-size:12px;color:#7a8498;margin-top:14px}@media(max-width:620px){.wrap{padding:18px 12px}.card{padding:14px}.join{grid-template-columns:1fr}.top{align-items:flex-start}}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top"><div class="brand"><div class="logo">CV</div> ClearView <span style="color:#8a94a8;font-weight:500">Viewer</span></div><div class="pill" id="livePill">NOT CONNECTED</div></header>
+  <main class="card">
+    <h1>Live camera viewer</h1>
+    <p>Join the room code provided by the person who is sharing their camera. Video and audio will play when the sharer has started streaming.</p>
+    <label for="room">Room code</label>
+    <div class="join"><input id="room" maxlength="32" placeholder="Enter room code"><button class="btn primary" id="join">Connect to stream</button></div>
+    <div style="height:18px"></div>
+    <div class="videoBox" id="videoBox">
+      <video id="remote" autoplay playsinline controls></video>
+      <div class="placeholder" id="placeholder"><div class="symbol">◉</div><strong>Waiting for a stream</strong><div style="font-size:13px;color:#9aa5b8;margin-top:7px">Connect using the room code above.</div></div>
+    </div>
+    <div class="controls">
+      <button class="btn" id="play" disabled>Play audio/video</button>
+      <button class="btn" id="mute" disabled>Mute audio</button>
+      <button class="btn" id="fullscreen" disabled>Full screen</button>
+      <button class="btn" id="disconnect" disabled>Disconnect</button>
+    </div>
+    <div class="status"><span class="dot" id="dot"></span><span id="status">Not connected to a room.</span></div>
+    <p class="note">For worldwide use, the server must be hosted over HTTPS and a TURN server may be required. Some browsers block autoplay with sound; press Play audio/video if prompted.</p>
+  </main>
+</div>
+<script src="/socket.io/socket.io.js"></script>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const socket = io();
+  let pc = null, room = "", remoteStream = null, audioMuted = false;
+  const setStatus = (text, live=false) => { $("status").textContent = text; $("dot").classList.toggle("live", live); $("livePill").classList.toggle("live", live); $("livePill").textContent = live ? "LIVE" : "NOT CONNECTED"; };
+  const params = new URLSearchParams(location.search);
+  $("room").value = params.get("room") || "";
+  function closePeer() { if (pc) pc.close(); pc = null; remoteStream = null; $("remote").srcObject = null; $("placeholder").style.display = "block"; $("play").disabled = true; $("mute").disabled = true; $("fullscreen").disabled = true; }
+  async function createPeer() {
+    closePeer();
+    pc = new RTCPeerConnection({ iceServers: [
+      { urls: "stun:stun.l.google.com:19302" }
+      // Add the same authenticated TURN service configuration used by the sharer.
+    ]});
+    const thisPc = pc;
+    pc.ontrack = event => {
+      if (thisPc !== pc) return;
+      remoteStream = event.streams[0] || remoteStream || new MediaStream([event.track]);
+      $("remote").srcObject = remoteStream;
+      $("placeholder").style.display = "none";
+      $("play").disabled = false; $("mute").disabled = false; $("fullscreen").disabled = false;
+      $("remote").play().catch(() => setStatus("Stream received. Press Play audio/video to start playback.", true));
+      setStatus("Receiving live video and audio.", true);
+    };
+    pc.onicecandidate = event => { if (event.candidate) socket.emit("webrtc-ice", { to: window.broadcasterId, candidate: event.candidate }); };
+    pc.onconnectionstatechange = () => {
+      if (thisPc !== pc) return;
+      if (pc.connectionState === "connected") setStatus("Receiving live video and audio.", true);
+      else if (["failed","disconnected","closed"].includes(pc.connectionState)) setStatus("Connection interrupted. The sharer may be offline or the network may block the connection.");
+    };
+    return pc;
+  }
+  $("join").onclick = () => {
+    room = $("room").value.trim();
+    if (!/^[A-Za-z0-9_-]{4,32}$/.test(room)) { alert("Enter a room code with 4–32 letters, numbers, underscores or hyphens."); return; }
+    socket.emit("join-room", { room, role: "viewer" });
+    $("join").disabled = true;
+    setStatus("Joining room…");
+  };
+  socket.on("room-joined", async ({ role, broadcasterOnline }) => {
+    if (role !== "viewer") return;
+    $("disconnect").disabled = false;
+    setStatus(broadcasterOnline ? "Room joined. Waiting for the sharer…" : "Room joined. Waiting for the sharer to come online…");
+  });
+  socket.on("webrtc-offer", async ({ from, offer }) => {
+    window.broadcasterId = from;
+    try {
+      const peer = await createPeer();
+      await peer.setRemoteDescription(offer);
+      const answer = await peer.createAnswer();
+      await peer.setLocalDescription(answer);
+      socket.emit("webrtc-answer", { to: from, answer });
+    } catch (e) { console.error(e); setStatus("Could not establish the video connection. Try reconnecting."); }
+  });
+  socket.on("webrtc-ice", async ({ from, candidate }) => {
+    if (from !== window.broadcasterId || !pc) return;
+    try { await pc.addIceCandidate(candidate); } catch (e) { console.warn(e); }
+  });
+  socket.on("sharing-stopped", () => { closePeer(); setStatus("The person sharing has stopped the stream."); });
+  socket.on("app-error", message => { setStatus(message); alert(message); $("join").disabled = false; });
+  $("play").onclick = () => $("remote").play().then(() => setStatus("Playing live video and audio.", true)).catch(() => setStatus("Playback failed. Check browser audio settings."));
+  $("mute").onclick = () => { audioMuted = !audioMuted; $("remote").muted = audioMuted; $("mute").textContent = audioMuted ? "Unmute audio" : "Mute audio"; };
+  $("fullscreen").onclick = async () => {
+    try { if ($("videoBox").requestFullscreen) await $("videoBox").requestFullscreen(); else if ($("remote").webkitEnterFullscreen) $("remote").webkitEnterFullscreen(); }
+    catch (e) { setStatus("Fullscreen is not available in this browser."); }
+  };
+  $("disconnect").onclick = () => {
+    closePeer();
+    socket.disconnect();
+    setStatus("Disconnected.");
+    $("join").disabled = false;
+    $("disconnect").disabled = true;
+  };
+  window.addEventListener("beforeunload", closePeer);
+})();
+</script>
+</body>
+</html>
