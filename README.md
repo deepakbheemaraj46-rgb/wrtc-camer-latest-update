@@ -1,1 +1,0 @@
-Complete starter WebRTC project with Socket.IO signaling scaffold, UI layout, camera selector placeholders, and client/server structure. Add TURN credentials and peer logic for deployment.
