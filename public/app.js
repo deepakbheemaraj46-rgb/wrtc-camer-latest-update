@@ -1,1 +1,0 @@
-const socket=io();let localStream;console.log("Starter WebRTC project");
